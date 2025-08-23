@@ -118,7 +118,16 @@ def is_excluded(line: str) -> bool:
 
 def extract_questions(path: str):
     """Extract questions from both paragraphs + tables."""
-    lines = [clean_line(l) for l in get_all_text(path)]
+    # Deduplicate consecutive identical lines
+    raw_lines = get_all_text(path)
+    lines = []
+    prev = None
+    for l in raw_lines:
+        l = clean_line(l)
+        if l and l != prev:  # skip duplicates
+            lines.append(l)
+        prev = l
+
     section = None
     result = []
     i = 0
@@ -139,21 +148,33 @@ def extract_questions(path: str):
             continue
 
         # ---------- Section A (MCQs) ----------
-                # ---------- Section A (MCQs) ----------
         if section == "A" and re.fullmatch(r"\d{1,2}", line):
             qnum = line
             i += 1
-            stem = []
-            # first line after number = stem
-            if i < len(lines) and not is_excluded(lines[i]):
-                stem.append(lines[i]); i += 1
+
+            # Question stem
+            stem_text = ""
+            while i < len(lines) and not re.match(r"^[ABCD]$", lines[i], re.I):
+                if not is_excluded(lines[i]) and not stem_text:
+                    stem_text = lines[i].strip()
+                i += 1
+
+            # Collect options (letter + next line)
             options = {}
-            # collect options A-D
-            while i < len(lines) and lines[i] in {"A", "B", "C", "D"}:
-                letter = lines[i]; i += 1
+            while i < len(lines) and re.match(r"^[ABCD]$", lines[i], re.I):
+                letter = lines[i].upper()
+                i += 1
                 if i < len(lines):
-                    options[letter] = lines[i]; i += 1
-            text = " ".join(stem) + "\n" + "\n".join([f"{k}. {v}" for k,v in options.items()])
+                    value = lines[i].strip()
+                    options[letter] = value
+                    i += 1
+
+            # Build final text
+            text = stem_text
+            for letter in ["A", "B", "C", "D"]:
+                if letter in options:
+                    text += f"\n{letter}. {options[letter]}"
+
             result.append({"section": "A", "label": qnum, "text": text})
             continue
 
@@ -176,10 +197,13 @@ def extract_questions(path: str):
             result.append({"section": section, "label": f"{qnum} {ab}".strip(), "text": text})
             continue
 
-
         i += 1
 
+    # 🔑 Ensure questions are sorted A → B → C, by number
+    section_order = {"A": 1, "B": 2, "C": 3}
+    result.sort(key=lambda x: (section_order[x["section"]], int(re.match(r"\d+", x["label"]).group())))
     return result
+
 
 
 # -----------------------------
@@ -212,16 +236,35 @@ def main():
         print("❌ No questions found.")
         return
 
+    # Ensure Section A → B → C ordering
+    section_order = {"A": 1, "B": 2, "C": 3}
+    def sort_key(x):
+        # Extract numeric part safely
+        m = re.match(r"^(\d+)", x["label"])
+        qnum = int(m.group(1)) if m else 0
+        return (section_order.get(x["section"], 99), qnum)
+
+    questions = sorted(questions, key=sort_key)
+
     print(f"✅ Found {len(questions)} questions.")
     model = whisper.load_model(WHISPER_MODEL)
 
     qa_items = []
+    current_section = None
     for q in questions:
         qlabel, qtext, section = q["label"], q["text"], q["section"]
 
-        print(f"\n📢 Question ({section}) {qlabel}: {qtext}")
+        # Announce section change only once
+        if section != current_section:
+            current_section = section
+            try:
+                speak_text(f"Now starting Section {section}")
+            except Exception as e:
+                print(f"(Audio playback skipped: {e})")
+
+        print(f"\n📢 Section {section} - Question {qlabel}: {qtext}")
         try:
-            speak_text(f"Section {section}. Question {qlabel}. {qtext}")
+            speak_text(f"Question {qlabel}. {qtext}")
         except Exception as e:
             print(f"(Audio playback skipped: {e})")
 
