@@ -1,177 +1,247 @@
-import pyttsx3
-import sounddevice as sd
-import numpy as np
-import whisper
-from docx import Document
 import re
-import threading
-import time
-import sys
-from PIL import Image
-import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+import os
+import tempfile
+from datetime import datetime
 
-# ======================
-# INITIAL SETUP
-# ======================
-engine = pyttsx3.init()
-model = whisper.load_model("base")
+import docx
+from docx import Document
 
-# Global timer
-total_time = 10 * 60  # 10 minutes in seconds
-remaining_time = total_time
-stop_flag = False
+import numpy as np
+import sounddevice as sd
+import wave
+import soundfile as sf
 
-# ======================
-# TIMER THREAD
-# ======================
-def countdown_timer():
-    global remaining_time, stop_flag
-    while remaining_time > 0 and not stop_flag:
-        time.sleep(1)
-        remaining_time -= 1
-    if remaining_time <= 0:
-        engine.say("Time is up! Saving your answers.")
-        engine.runAndWait()
-        stop_flag = True
+import whisper
+from gtts import gTTS
+import pygame
 
-# ======================
-# SPEECH INPUT FUNCTION
-# ======================
-def get_speech_input(prompt_text):
-    global remaining_time, stop_flag
-    if stop_flag:   # stop if timer expired
-        return "timeout"
 
-    engine.say(prompt_text)
-    engine.runAndWait()
-    
-    print(prompt_text)
-    duration = 5  # seconds for recording
-    sample_rate = 16000
-    
-    print("Recording...")
-    audio_data = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1, dtype=np.float32)
+# -----------------------------
+# Config
+# -----------------------------
+INPUT_DOC = "mugilanQp.docx"   # your question paper file
+OUTPUT_DOC = "answers.docx"
+RECORD_SECONDS = 10            # recording time per question
+SAMPLE_RATE = 16000            # Whisper expects 16kHz audio
+WHISPER_MODEL = "base"         # "tiny", "base", "small", "medium", "large"
+
+EXCLUDE_SUBSTRS = {
+    "answer all questions",
+    "name & signature",
+    "department of data science",
+    "max. marks",
+    "time duration",
+    "affiliated to",
+    "college",
+    "batch:", "class:", "subject title:", "semester:",
+    "mid term", "reviewer"
+}
+
+
+# -----------------------------
+# Audio Helpers
+# -----------------------------
+def speak_text(text: str):
+    """Convert text to speech and play with pygame."""
+    if not pygame.mixer.get_init():
+        pygame.mixer.init()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+        temp_mp3 = fp.name
+    try:
+        gTTS(text=text, lang="en").save(temp_mp3)
+        pygame.mixer.music.load(temp_mp3)
+        pygame.mixer.music.play()
+        clock = pygame.time.Clock()
+        while pygame.mixer.music.get_busy():
+            clock.tick(10)
+    finally:
+        try:
+            pygame.mixer.music.unload()
+        except Exception:
+            pass
+        if os.path.exists(temp_mp3):
+            os.remove(temp_mp3)
+
+
+def record_wav(path: str, seconds: int = RECORD_SECONDS, sr: int = SAMPLE_RATE):
+    print(f"🎤 Recording for {seconds} seconds... Answer now!")
+    audio = sd.rec(int(seconds * sr), samplerate=sr, channels=1, dtype="int16")
     sd.wait()
-    print("Recording complete.")
-    
-    audio_data = np.squeeze(audio_data)
-    result = model.transcribe(audio_data, fp16=False)
-    
-    # Clean text -> remove punctuation and lowercase
-    text = result["text"].strip().lower()
-    text = re.sub(r"[^\w\s]", "", text)
-    
-    print(f"You said: {text}")
-    
-    # Special command: check remaining time
-    if text == "time":
-        minutes = remaining_time // 60
-        seconds = remaining_time % 60
-        msg = f"{minutes} minutes {seconds} seconds remaining."
-        print(msg)
-        engine.say(msg)
-        engine.runAndWait()
-        return "repeat"  # ask again after telling time
-    
-    return text
-
-# ======================
-# ASK NAME AND SUBJECT
-# ======================
-user_name = get_speech_input("Please say your name.")
-if user_name in ["timeout", ""]:
-    engine.say("Could not detect your name. Exiting.")
-    engine.runAndWait()
-    sys.exit()
-
-subject = get_speech_input("Please say your subject.")
-if subject in ["timeout", ""]:
-    engine.say("Could not detect the subject. Exiting.")
-    engine.runAndWait()
-    sys.exit()
-
-if subject != "mathematics":
-    engine.say("Only mathematics quiz is available. Exiting.")
-    engine.runAndWait()
-    sys.exit()
-
-engine.say(f"Welcome {user_name}. Starting the mathematics quiz now.")
-engine.runAndWait()
-
-# Start timer in background only after verification
-timer_thread = threading.Thread(target=countdown_timer, daemon=True)
-timer_thread.start()
-
-# ======================
-# LOAD QUESTIONS
-# ======================
+    with wave.open(path, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # int16
+        wf.setframerate(sr)
+        wf.writeframes(audio.tobytes())
 
 
-# ======================
-# LOAD QUESTIONS (from image)
-# ======================
-img = Image.open("sample1.png")
-
-# Extract raw text from image
-raw_text = pytesseract.image_to_string(img)
-
-# Split into lines
-lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
-
-qa_pairs = []
-current_question = []
-
-for text in lines:
-    # Detect if line starts with digit + dot (like "1." , "2." etc.)
-    if re.match(r"^\d+\.", text):
-        if current_question:
-            qa_pairs.append(current_question)
-        current_question = [text]
-    else:
-        current_question.append(text)
-
-if current_question:
-    qa_pairs.append(current_question)
+def transcribe_wav(path: str, model) -> str:
+    """Transcribe WAV file with Whisper (no ffmpeg)."""
+    audio, sr = sf.read(path, dtype="float32")
+    if sr != SAMPLE_RATE:
+        raise ValueError(f"Recording must be {SAMPLE_RATE} Hz, got {sr}")
+    result = model.transcribe(audio, fp16=False)
+    return (result.get("text") or "").strip()
 
 
-# ======================
-# OUTPUT DOCUMENT
-# ======================
-new_doc = Document()
-new_doc.add_paragraph(f"Name: {user_name}")
-new_doc.add_paragraph(f"Subject: {subject}\n")
+# -----------------------------
+# Docx Extractor
+# -----------------------------
+def get_all_text(doc_path):
+    """Extract text from both paragraphs and tables."""
+    doc = docx.Document(doc_path)
+    lines = []
 
-for q_block in qa_pairs:
-    if stop_flag:
-        break
+    # paragraphs
+    for p in doc.paragraphs:
+        if p.text.strip():
+            lines.append(p.text.strip())
 
-    question_text = "\n".join(q_block)
-    
-    while not stop_flag:  # loop until answered or skipped
-        engine.say(question_text)
-        engine.runAndWait()
-        print("\n" + question_text)
-        
-        answer = get_speech_input("Please speak your answer for this question.")
-        
-        if answer == "timeout":
-            break  # timer ended
-        elif answer == "repeat":
-            print("Repeating the question...")
+    # tables
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                txt = cell.text.strip()
+                if txt:
+                    lines.append(txt)
+
+    return lines
+
+
+def clean_line(s: str) -> str:
+    return re.sub(r"\s+", " ", s.strip())
+
+
+def is_excluded(line: str) -> bool:
+    l = line.lower()
+    return any(key in l for key in EXCLUDE_SUBSTRS)
+
+
+def extract_questions(path: str):
+    """Extract questions from both paragraphs + tables."""
+    lines = [clean_line(l) for l in get_all_text(path)]
+    section = None
+    result = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        # Detect section headers
+        if line.lower().startswith("section a"):
+            section = "A"; i += 1; continue
+        if line.lower().startswith("section b"):
+            section = "B"; i += 1; continue
+        if line.lower().startswith("section c"):
+            section = "C"; i += 1; continue
+
+        if not section or is_excluded(line):
+            i += 1
             continue
-        elif answer == "skip":
-            print("Skipping this question...")
-            answer = "Not Answered"
-        
-        # Save question + answer
-        new_doc.add_paragraph(question_text)
-        new_doc.add_paragraph(f"Answer: {answer}\n")
-        break
 
-# ======================
-# SAVE AND EXIT
-# ======================
-new_doc.save("sample2.docx")
-print("All questions and answers have been saved to sample2.docx")
-sys.exit()
+        # ---------- Section A (MCQs) ----------
+                # ---------- Section A (MCQs) ----------
+        if section == "A" and re.fullmatch(r"\d{1,2}", line):
+            qnum = line
+            i += 1
+            stem = []
+            # first line after number = stem
+            if i < len(lines) and not is_excluded(lines[i]):
+                stem.append(lines[i]); i += 1
+            options = {}
+            # collect options A-D
+            while i < len(lines) and lines[i] in {"A", "B", "C", "D"}:
+                letter = lines[i]; i += 1
+                if i < len(lines):
+                    options[letter] = lines[i]; i += 1
+            text = " ".join(stem) + "\n" + "\n".join([f"{k}. {v}" for k,v in options.items()])
+            result.append({"section": "A", "label": qnum, "text": text})
+            continue
+
+        # ---------- Section B/C ----------
+        m = re.match(r"^(\d{1,2})\s*([AB])?\s*(.*)$", line)
+        if section in {"B", "C"} and m:
+            qnum, ab, rest = m.groups()
+            ab = ab or ""   # might be empty
+            block = [rest] if rest else []
+            i += 1
+            while i < len(lines) and not re.match(r"^\d{1,2}\s*[AB]?", lines[i]) and not lines[i].lower().startswith("section"):
+                if not is_excluded(lines[i]) and lines[i] != "(OR)":
+                    # handle case where "B" is on its own line
+                    if lines[i] in {"A", "B"} and not block:
+                        ab = lines[i]
+                    else:
+                        block.append(lines[i])
+                i += 1
+            text = " ".join(block)
+            result.append({"section": section, "label": f"{qnum} {ab}".strip(), "text": text})
+            continue
+
+
+        i += 1
+
+    return result
+
+
+# -----------------------------
+# Save Answers to DOCX
+# -----------------------------
+def save_answers_docx(path: str, qa_items):
+    doc = Document()
+    doc.add_heading("Answers Document", 0)
+    doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    current_section = None
+    for item in qa_items:
+        if item["section"] != current_section:
+            current_section = item["section"]
+            doc.add_heading(f"Section {current_section}", level=1)
+        doc.add_paragraph(f"Q{item['label']}: {item['text']}", style="List Bullet")
+        doc.add_paragraph(f"A{item['label']}: {item.get('answer','').strip()}\n")
+    doc.save(path)
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    if not os.path.exists(INPUT_DOC):
+        raise FileNotFoundError(f"Input DOCX not found: {INPUT_DOC}")
+
+    print("📄 Extracting questions...")
+    questions = extract_questions(INPUT_DOC)
+    if not questions:
+        print("❌ No questions found.")
+        return
+
+    print(f"✅ Found {len(questions)} questions.")
+    model = whisper.load_model(WHISPER_MODEL)
+
+    qa_items = []
+    for q in questions:
+        qlabel, qtext, section = q["label"], q["text"], q["section"]
+
+        print(f"\n📢 Question ({section}) {qlabel}: {qtext}")
+        try:
+            speak_text(f"Section {section}. Question {qlabel}. {qtext}")
+        except Exception as e:
+            print(f"(Audio playback skipped: {e})")
+
+        temp_wav = os.path.join(tempfile.gettempdir(), f"ans_{section}_{qlabel}.wav")
+        record_wav(temp_wav, seconds=RECORD_SECONDS, sr=SAMPLE_RATE)
+        try:
+            answer = transcribe_wav(temp_wav, model)
+        except Exception as e:
+            print(f"Transcription error: {e}")
+            answer = ""
+        finally:
+            if os.path.exists(temp_wav):
+                os.remove(temp_wav)
+
+        print(f"✅ Transcribed Answer ({qlabel}): {answer}")
+        qa_items.append({"section": section, "label": qlabel, "text": qtext, "answer": answer})
+
+    save_answers_docx(OUTPUT_DOC, qa_items)
+    print(f"\n🎉 All answers saved to: {OUTPUT_DOC}")
+
+
+if __name__ == "__main__":
+    main()
