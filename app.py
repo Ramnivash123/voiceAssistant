@@ -219,17 +219,72 @@ def save_answers_docx(path: str, qa_items):
 # -----------------------------
 # Main
 # -----------------------------
+def extract_metadata(path: str):
+    """Extract name and subject title from the DOCX."""
+    raw_lines = get_all_text(path)
+    name, subject = None, None
+    for line in raw_lines:
+        if line.strip().lower().startswith("name:"):
+            name = line.split(":", 1)[-1].strip()
+        if line.strip().lower().startswith("subject title:"):
+            subject = line.split(":", 1)[-1].strip()
+    return name, subject
+
+
 def main():
     if not os.path.exists(INPUT_DOC):
         raise FileNotFoundError(f"Input DOCX not found: {INPUT_DOC}")
 
+    # -------------------------
+    # 1. Extract metadata
+    # -------------------------
+    name, subject = extract_metadata(INPUT_DOC)
+    if not name or not subject:
+        print("⚠️ Could not find name/subject in the paper.")
+        return
+
+    print(f"📄 Candidate: {name}, Subject: {subject}")
+
+    model = whisper.load_model(WHISPER_MODEL)
+
+    # Ask confirmation
+    intro_q = f"Are you {name} and attending {subject} exam?"
+    print(f"\n📢 {intro_q}")
+    try:
+        speak_text(intro_q)
+    except Exception as e:
+        print(f"(Audio playback skipped: {e})")
+
+    temp_wav = os.path.join(tempfile.gettempdir(), "intro.wav")
+    record_wav(temp_wav, seconds=5, sr=SAMPLE_RATE)
+    try:
+        response = transcribe_wav(temp_wav, model).lower()
+    except Exception as e:
+        response = ""
+    finally:
+        if os.path.exists(temp_wav):
+            os.remove(temp_wav)
+
+    if "yes" not in response:
+        print("❌ Confirmation failed. Exiting.")
+        return
+
+    print("✅ Confirmation accepted.")
+    try:
+        speak_text("Welcome to voice assistant exam. Let's start.")
+    except Exception as e:
+        print(f"(Audio playback skipped: {e})")
+
+    # -------------------------
+    # 2. Extract Questions
+    # -------------------------
     print("📄 Extracting questions...")
     questions = extract_questions(INPUT_DOC)
     if not questions:
         print("❌ No questions found.")
         return
 
-    # 🔑 Sort in natural order (A->B->C) but drop sections later
+    # Sort naturally but drop section labels
     section_order = {"A": 1, "B": 2, "C": 3}
 
     def sort_key(x):
@@ -241,15 +296,11 @@ def main():
         return (section_order.get(x["section"], 99), qnum, x["label"].strip())
 
     questions = sorted(questions, key=sort_key)
-
     print(f"✅ Found {len(questions)} questions.")
-    model = whisper.load_model(WHISPER_MODEL)
 
     qa_items = []
     for idx, q in enumerate(questions, start=1):
         qtext = q["text"]
-
-        # 🚫 No more Section labels
         print(f"\n📢 Question {idx}: {qtext}")
         try:
             speak_text(f"Question {idx}. {qtext}")
@@ -270,7 +321,7 @@ def main():
         print(f"✅ Transcribed Answer (Q{idx}): {answer}")
         qa_items.append({"label": str(idx), "text": qtext, "answer": answer})
 
-    # save without sections
+    # Save answers
     save_answers_docx(OUTPUT_DOC, qa_items)
     print(f"\n🎉 All answers saved to: {OUTPUT_DOC}")
 
