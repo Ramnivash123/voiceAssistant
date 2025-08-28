@@ -14,6 +14,34 @@ import soundfile as sf
 import whisper
 from gtts import gTTS
 import pygame
+import threading
+import time
+from datetime import datetime, timedelta
+
+
+# -----------------------------
+# Timer Thread
+# -----------------------------
+class ExamTimer(threading.Thread):
+    def __init__(self, duration_seconds=7200):
+        super().__init__(daemon=True)
+        self.start_time = datetime.now()
+        self.end_time = self.start_time + timedelta(seconds=duration_seconds)
+
+    def remaining_time(self):
+        now = datetime.now()
+        if now >= self.end_time:
+            return 0
+        return int((self.end_time - now).total_seconds())
+
+    def formatted_remaining(self):
+        seconds = self.remaining_time()
+        if seconds <= 0:
+            return "Time is up."
+        mins, secs = divmod(seconds, 60)
+        hrs, mins = divmod(mins, 60)
+        return f"{hrs} hours {mins} minutes {secs} seconds remaining"
+
 
 
 # -----------------------------
@@ -232,6 +260,9 @@ def extract_metadata(path: str):
 
 
 def main():
+    timer = ExamTimer(duration_seconds=7200)  # 2 hrs
+    timer.start()
+
     if not os.path.exists(INPUT_DOC):
         raise FileNotFoundError(f"Input DOCX not found: {INPUT_DOC}")
 
@@ -248,7 +279,7 @@ def main():
     model = whisper.load_model(WHISPER_MODEL)
 
     # Ask confirmation
-    intro_q = f"Are you {name} and attending {subject} exam?"
+    intro_q = f"Are you {name} studying at Kumaraguru college of Liberal Arts and Science and attending {subject} exam?"
     print(f"\n📢 {intro_q}")
     try:
         speak_text(intro_q)
@@ -300,26 +331,72 @@ def main():
 
     qa_items = []
     for idx, q in enumerate(questions, start=1):
-        qtext = q["text"]
-        print(f"\n📢 Question {idx}: {qtext}")
-        try:
-            speak_text(f"Question {idx}. {qtext}")
-        except Exception as e:
-            print(f"(Audio playback skipped: {e})")
+        while True:  # repeat loop until answered or skipped
+            qtext = q["text"]
+            print(f"\n📢 Question {idx}: {qtext}")
+            try:
+                speak_text(
+                    f"Question {idx}. {qtext}. You can say 'skip' to skip or 'repeat' to hear again."
+                )
+            except Exception as e:
+                print(f"(Audio playback skipped: {e})")
 
-        temp_wav = os.path.join(tempfile.gettempdir(), f"ans_{idx}.wav")
-        record_wav(temp_wav, seconds=RECORD_SECONDS, sr=SAMPLE_RATE)
-        try:
-            answer = transcribe_wav(temp_wav, model)
-        except Exception as e:
-            print(f"Transcription error: {e}")
-            answer = ""
-        finally:
-            if os.path.exists(temp_wav):
-                os.remove(temp_wav)
+            # --- Choose recording duration dynamically ---
+            if idx <= 10:
+                duration = 5
+            elif 11 <= idx <= 15:
+                duration = 120
+            elif idx in (16, 17):
+                duration = 300
+            else:
+                duration = RECORD_SECONDS  # fallback default
 
-        print(f"✅ Transcribed Answer (Q{idx}): {answer}")
-        qa_items.append({"label": str(idx), "text": qtext, "answer": answer})
+            temp_wav = os.path.join(tempfile.gettempdir(), f"ans_{idx}.wav")
+            record_wav(temp_wav, seconds=duration, sr=SAMPLE_RATE)
+
+            try:
+                answer = transcribe_wav(temp_wav, model).lower()
+            except Exception as e:
+                print(f"Transcription error: {e}")
+                answer = ""
+            finally:
+                if os.path.exists(temp_wav):
+                    os.remove(temp_wav)
+
+            # --- Handle special commands ---
+            if "skip" in answer:
+                print(f"⏭️ Skipped Question {idx}")
+                qa_items.append(
+                    {"label": str(idx), "text": qtext, "answer": "[SKIPPED]"}
+                )
+                break  # move to next question
+            elif "repeat" in answer:
+                print(f"🔁 Repeating Question {idx}")
+                continue  # re-ask same question
+            elif "time" in answer:
+                remaining = timer.formatted_remaining()
+                print(f"⏳ {remaining}")
+                try:
+                    speak_text(remaining)
+                except Exception as e:
+                    print(f"(Audio playback skipped: {e})")
+                continue  # ask the same question again
+            else:
+                # Normal answer
+                print(f"✅ Transcribed Answer (Q{idx}): {answer}")
+                qa_items.append(
+                    {"label": str(idx), "text": qtext, "answer": answer}
+                )
+
+                # --- Say the answer back to candidate ---
+                try:
+                    if answer.strip():
+                        speak_text(f"You answered: {answer}")
+                except Exception as e:
+                    print(f"(Audio playback skipped: {e})")
+
+                break
+
 
     # Save answers
     save_answers_docx(OUTPUT_DOC, qa_items)
