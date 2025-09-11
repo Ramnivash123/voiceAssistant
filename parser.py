@@ -18,6 +18,8 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+qa_progress = []  # live list of Q&A for web
+
 
 # -----------------------------
 # Timer Thread
@@ -387,6 +389,10 @@ def main():
                 qa_items.append(
                     {"label": str(idx), "text": qtext, "answer": answer}
                 )
+                qa_progress.append(
+                    {"label": str(idx), "text": qtext, "answer": answer}
+                )
+
 
                 # --- Say the answer back to candidate ---
                 try:
