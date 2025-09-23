@@ -3,6 +3,6 @@ numpy==1.25.2
 sounddevice==0.8.8
 soundfile==0.12.1
 python-docx==0.8.11
-whisper @ git+https://github.com/openai/whisper.git
 gTTS==2.3.2
 pygame==2.5.2
+whisper @ git+https://github.com/openai/whisper.git
