@@ -1,8 +1,8 @@
 Flask==2.3.3
 numpy==1.25.2
-sounddevice==0.8.7
+sounddevice==0.8.8
 soundfile==0.12.1
 python-docx==0.8.11
-whisper==20230314
+whisper @ git+https://github.com/openai/whisper.git
 gTTS==2.3.2
 pygame==2.5.2
